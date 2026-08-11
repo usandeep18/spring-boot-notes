@@ -2,6 +2,34 @@
 
 _Status: In progress — topics being taught one at a time in chat; full notes filled in as each topic is covered._
 
+---
+
+## 📖 Glossary (terms used in this chapter)
+
+Quick-reference definitions. Each links to where it's explained in full.
+
+| Term | Plain-English meaning | Covered in |
+|---|---|---|
+| **Bean** | Any object that **Spring creates and manages** for you (instead of you writing `new`). A class becomes a bean by carrying `@Component`/`@Service`/`@Repository`/`@Controller`. | [Section 4a](#4a-what-is-a-bean) |
+| **Bean Definition** ("recipe") | The **information about** a bean — its name, class, dependencies, scope. Metadata only; **not an object yet**. Spring registers all definitions before creating any objects. | [Section 4b](#4b-bean-definitions-vs-bean-instances-recipes-vs-cooked-dishes) |
+| **Container** | The engine (`ApplicationContext`) that stores bean definitions, creates the beans, injects their dependencies, and manages their lifecycle. | [Section 4](#4-spring-container) |
+| **IoC** | *Inversion of Control* — the principle that the framework, not your code, controls object creation and wiring. | [Section 2](#2-ioc-inversion-of-control) |
+| **DI** | *Dependency Injection* — the technique the container uses to implement IoC: handing dependencies into your objects. | [Section 3](#3-dependency-injection) |
+| **Dependency** | Any object your class needs to do its job (e.g. `OrderService` needs a `PaymentGateway`). | [Section 3](#3-dependency-injection) |
+| **Decoupled** | A class depends only on an interface, not a concrete class — so implementations can be swapped without editing it. | [Section 1 doubt](#1-what-is-spring-framework-why-spring) |
+| **Component scanning** | Spring's startup search through your packages for annotated classes to register as beans. | [Section 3](#how-spring-actually-finds-a-bean-of-the-required-type-internals) |
+| **Deepest first** | The creation order: Spring builds the bean with **no dependencies of its own** first, then works back up the chain. | [Section 4c](#4c-creation-order-deepest-first) |
+| **Singleton** | Spring creates **one shared instance** and gives that same object to everyone who needs it. This is the default scope. | Topic 6 (Bean Scopes) |
+| **Scope** | How many instances of a bean Spring creates and how long each lives. | Topic 6 (Bean Scopes) |
+| **Eager** | Bean is created at startup even if nothing has used it yet — Spring's default. | Topic 10 (Lazy Init) |
+| **Lazy** | Bean is created only the first time something actually asks for it. | Topic 10 (Lazy Init) |
+| **Fail-fast** | Wiring errors crash the app **at startup** rather than surfacing later mid-request. | [Section 3](#how-spring-resolves-what-to-inject--by-type-first) |
+| **Lifecycle** | The sequence of stages a bean passes through, from creation to destruction. | [Section 5](#5-bean-lifecycle) |
+| **Hook / Callback** | A method *you* write that *Spring* calls automatically at a specific moment (you never call it yourself). | [Section 5](#5-bean-lifecycle) |
+| **Graceful shutdown** | App is asked politely to stop (`Ctrl+C`, `SIGTERM`) and gets time to clean up — as opposed to being force-killed. | [Section 5](#two-important-gotchas) |
+
+---
+
 ## 1. What is Spring Framework? Why Spring?
 
 Plain Java forces you to manually `new` up every object and wire dependencies by hand.
@@ -334,3 +362,294 @@ flowchart TD
 > @Service public class StripeGateway  implements PaymentGateway { ... }  // 2 candidates
 > ```
 > → startup fails with `NoUniqueBeanDefinitionException`. This is exactly what `@Primary` and `@Qualifier` solve (Topic 9).
+
+---
+
+## 4. Spring Container
+
+The **container** is the engine that does all the IoC/DI work. It's an actual object living in memory for your application's entire lifetime.
+
+### 4a. What is a "Bean"?
+
+**A bean is simply an object that Spring creates and manages for you.** That is the entire definition.
+
+The difference is *who* creates the object:
+
+```java
+// ❌ NOT a bean — you created it, Spring knows nothing about it
+OrderService service = new OrderService();
+
+// ✅ A BEAN — Spring created it (because of @Service) and manages it
+@Service
+public class OrderService { }
+```
+
+```mermaid
+flowchart TD
+    A["An object in your app"] --> B{"Who created it?"}
+    B -->|"You, with new()"| C["Just a normal Java object.<br/>Spring can't inject anything into it,<br/>can't manage its lifecycle."]
+    B -->|"Spring, because of<br/>@Service / @Component"| D["<b>A BEAN.</b><br/>Spring wires its dependencies,<br/>runs its lifecycle hooks,<br/>and can inject it elsewhere."]
+```
+
+So "Spring creates the beans at startup" simply means "Spring creates the objects for all your `@Service`/`@Component`/`@Repository`/`@Controller` classes."
+
+> The word "bean" is a leftover from an old Java convention called *JavaBeans*. The name carries no useful meaning today — read it as **"Spring-managed object."**
+
+### 4b. Bean Definitions vs Bean Instances (recipes vs cooked dishes)
+
+Spring's startup runs in **two separate phases** — a common beginner confusion point.
+
+**Phase 1 — Registration.** Spring scans your code and writes down *information about* each class: name, type, required dependencies, scope. This written-down information is a **bean definition**. It is **not** an object — it's metadata describing how to build one later.
+
+**Phase 2 — Instantiation.** Spring reads those definitions and actually calls the constructors, creating real objects in memory. Those objects are the **beans**.
+
+```mermaid
+flowchart TD
+    subgraph P1["Phase 1: Registration"]
+        A["Spring scans classes"] --> B["<b>Bean Definition</b> = a RECIPE<br/>─────────────<br/>name: orderService<br/>class: OrderService.class<br/>needs: a PaymentGateway<br/>scope: singleton<br/><br/>📄 Just written info.<br/>No object exists yet."]
+    end
+    subgraph P2["Phase 2: Instantiation"]
+        C["Spring reads each recipe"] --> D["<b>Bean</b> = the COOKED DISH<br/>─────────────<br/>an actual OrderService object<br/>in memory, with its gateway<br/>field filled in<br/><br/>🍲 Real object now exists."]
+    end
+    B --> C
+```
+
+**Why two phases?** Spring must know about *all* classes before creating *any* of them. If it instantiated `OrderService` the instant it found it, `RazorpayGateway` might not have been discovered yet, and wiring would fail. Reading all the recipes first gives Spring the complete picture before it starts "cooking."
+
+### 4c. Creation order — "deepest first"
+
+This is the **order** in which Spring creates objects when beans depend on each other.
+
+Our chain: `OrderController` needs `OrderService`, which needs `RazorpayGateway`, which needs nothing.
+
+Spring **cannot** create `OrderController` first — its constructor demands a finished `OrderService` that doesn't exist yet. So Spring starts with whatever needs nothing and builds up.
+
+```mermaid
+flowchart TD
+    subgraph CHAIN["The dependency chain"]
+        A["OrderController<br/>needs OrderService"] --> B["OrderService<br/>needs PaymentGateway"]
+        B --> C["RazorpayGateway<br/>needs NOTHING ← 'deepest'"]
+    end
+    subgraph ORDER["Creation order (deepest first)"]
+        D["1️⃣ RazorpayGateway<br/>(nothing to wait for — build it)"] --> E["2️⃣ OrderService<br/>(its gateway now exists — build it)"]
+        E --> F["3️⃣ OrderController<br/>(its service now exists — build it)"]
+    end
+```
+
+**"Deepest"** = the bean furthest down the chain, the one with no dependencies of its own. Spring starts there and works back up. Like building a house: foundation → walls → roof. You can't start with the roof.
+
+### What the container actually holds
+
+Three responsibilities in one object:
+
+```mermaid
+flowchart TD
+    C["<b>Spring Container</b>"] --> A["<b>1. Registry</b><br/>bean definitions<br/>(the 'recipes')"]
+    C --> B["<b>2. Factory</b><br/>creates the actual<br/>bean objects"]
+    C --> D["<b>3. Lifecycle Manager</b><br/>runs init/destroy hooks,<br/>manages scopes"]
+```
+
+### BeanFactory vs ApplicationContext
+
+| | `BeanFactory` | `ApplicationContext` |
+|---|---|---|
+| Role | Root/basic container interface | Extends `BeanFactory`, adds enterprise features |
+| Bean loading | **Lazy** — creates a bean only when requested | **Eager** — creates all singletons at startup |
+| Extra features | None | Event publishing, i18n, AOP integration, annotation config, resource loading |
+| Used today? | Almost never directly | **Yes — this is what Spring Boot uses** |
+
+```mermaid
+flowchart TD
+    BF["<b>BeanFactory</b><br/>basic DI, lazy loading"] --> AC["<b>ApplicationContext</b><br/>extends BeanFactory<br/>+ eager loading, events, i18n, AOP"]
+    AC --> A1["AnnotationConfigApplicationContext<br/>(plain Spring, annotation-based)"]
+    AC --> A2["ClassPathXmlApplicationContext<br/>(legacy XML config)"]
+    AC --> A3["<b>Spring Boot's auto-configured context</b><br/>← what you actually use"]
+```
+
+**Rule of thumb**: `ApplicationContext` *is* `BeanFactory` plus extras. When someone says "the Spring container," they mean `ApplicationContext`.
+
+### Where the container is created in your project
+
+One line does it — in `MyProject2Application.java`:
+
+```java
+@SpringBootApplication
+public class MyProject2Application {
+    public static void main(String[] args) {
+        SpringApplication.run(MyProject2Application.class, args);
+        //  ↑ this single line: creates the ApplicationContext, scans packages,
+        //    registers bean definitions, instantiates beans, injects dependencies,
+        //    starts embedded Tomcat — all before your app is "up"
+    }
+}
+```
+
+`run()` also **returns** the container if you need a handle on it:
+```java
+ApplicationContext context = SpringApplication.run(MyProject2Application.class, args);
+```
+
+**Source reference**: `c:\Users\Asus\Downloads\demo\myProject2\src\main\java\com\example\myproject2\MyProject2Application.java`
+
+### Startup sequence inside `run()`
+
+```mermaid
+flowchart TD
+    A["main() calls SpringApplication.run()"] --> B["1. Create ApplicationContext"]
+    B --> C["2. Component scan<br/>find @Component/@Service/@Repository/@Controller"]
+    C --> D["3. Register bean definitions<br/>(recipes only, no objects yet)"]
+    D --> E["4. Instantiate singleton beans<br/>(eagerly, dependency order: deepest first)"]
+    E --> F["5. Inject dependencies<br/>into constructors/fields/setters"]
+    F --> G["6. Run lifecycle callbacks<br/>@PostConstruct"]
+    G --> H["7. Start embedded Tomcat"]
+    H --> I["✅ Application ready to serve requests"]
+```
+
+### Getting a bean manually — and why you usually shouldn't
+
+```java
+ApplicationContext context = SpringApplication.run(MyProject2Application.class, args);
+
+OrderService service = context.getBean(OrderService.class);                   // by type
+OrderService s2      = context.getBean("orderService", OrderService.class);   // by name + type
+```
+
+> ⚠️ **Pitfall**: calling `getBean()` inside your business classes defeats the purpose of DI — you're *pulling* dependencies instead of having them *pushed* to you, which re-couples your class to Spring itself. Use constructor injection. `getBean()` is for rare framework-level code or quick experiments in `main()`.
+
+```mermaid
+flowchart LR
+    subgraph BAD["❌ Dependency Lookup (pull)"]
+        B1["OrderService"] -->|"context.getBean()"| B2["Container"]
+        B3["OrderService now depends<br/>on Spring itself"]
+    end
+    subgraph GOOD["✅ Dependency Injection (push)"]
+        G1["Container"] -->|"injects via constructor"| G2["OrderService"]
+        G3["OrderService is plain Java,<br/>knows nothing about Spring"]
+    end
+```
+
+**Interview line**: *"The Spring container is the `ApplicationContext` — it holds bean definitions, creates and wires the bean instances, and manages their lifecycle. `ApplicationContext` extends `BeanFactory`, adding eager singleton loading, event publishing, and AOP support. In Spring Boot it's created by `SpringApplication.run()`."*
+
+---
+
+## 5. Bean Lifecycle
+
+**"Lifecycle"** = the complete sequence of stages a bean goes through, from the moment Spring creates it until it's destroyed at app shutdown.
+
+**Why it matters**: sometimes you need code to run **right after** a bean is ready (load a cache, open a connection, validate config), or **right before** it dies (close a connection, flush data). The lifecycle gives you exact hook points for this.
+
+**"Hook" / "callback"** = a method *you* write that *Spring* calls automatically at a specific moment. You never call it yourself — Spring "calls back" into your code at the right time.
+
+### The full lifecycle
+
+```mermaid
+flowchart TD
+    S["🟢 Container starts up"] --> A["<b>1. Instantiation</b><br/>Spring calls the constructor<br/>→ object now exists, but its<br/>dependencies are NOT set yet"]
+    A --> B["<b>2. Dependency Injection</b><br/>Spring fills in dependencies<br/>(constructor args / fields / setters)<br/>→ object is now fully wired"]
+    B --> C["<b>3. Aware interfaces</b> (optional, rare)<br/>Spring passes in framework info<br/>if the bean asks for it"]
+    C --> D["<b>4. @PostConstruct</b><br/>your init method runs<br/>→ safe to use dependencies here"]
+    D --> E["✅ <b>5. BEAN IS READY</b><br/>lives here for the whole app,<br/>serving requests"]
+    E --> F["🔻 App shutdown begins"]
+    F --> G["<b>6. @PreDestroy</b><br/>your cleanup method runs"]
+    G --> H["<b>7. Bean destroyed</b><br/>memory released"]
+```
+
+### The two hooks you'll actually use
+
+```java
+package com.example.myproject2.service;
+
+import jakarta.annotation.PostConstruct;   // Spring Boot 3+ uses jakarta.*
+import jakarta.annotation.PreDestroy;      // (older Spring used javax.*)
+import org.springframework.stereotype.Service;
+
+@Service
+public class OrderService {
+
+    private final PaymentGateway gateway;
+
+    // ── STAGE 1: constructor runs first ──
+    public OrderService(PaymentGateway gateway) {
+        this.gateway = gateway;
+        System.out.println("1. Constructor called - dependencies injected");
+    }
+
+    // ── STAGE 4: runs ONCE, after injection, before the bean serves anyone ──
+    @PostConstruct
+    public void init() {
+        System.out.println("2. @PostConstruct - bean fully ready, safe to use gateway");
+        // typical real uses: warm up a cache, open a connection,
+        // validate that required config values are present
+    }
+
+    // ── STAGE 6: runs ONCE, at app shutdown, before the bean is destroyed ──
+    @PreDestroy
+    public void cleanup() {
+        System.out.println("3. @PreDestroy - releasing resources before shutdown");
+        // typical real uses: close connections, flush buffers,
+        // deregister from a service registry
+    }
+}
+```
+
+**Console output when you run the app:**
+```
+1. Constructor called - dependencies injected
+2. @PostConstruct - bean fully ready, safe to use gateway
+   ... app runs, serves requests ...
+3. @PreDestroy - releasing resources before shutdown
+```
+
+### Why `@PostConstruct` exists — the constructor trap
+
+A common interview probe: why not just put init logic in the constructor?
+
+```mermaid
+flowchart TD
+    subgraph CONS["❌ Init logic inside the constructor"]
+        A["Constructor runs"] --> B["Constructor-injected deps are OK...<br/>...but FIELD/SETTER-injected ones<br/>are still null at this moment"]
+        B --> C["💥 NullPointerException risk"]
+    end
+    subgraph POST["✅ Init logic in @PostConstruct"]
+        D["Constructor runs"] --> E["ALL injection finishes<br/>(constructor + field + setter)"]
+        E --> F["@PostConstruct runs<br/>→ everything guaranteed available"]
+        F --> G["✅ Safe"]
+    end
+```
+
+**In one line**: the constructor runs *during* wiring; `@PostConstruct` runs *after all wiring is complete*. Anything depending on the bean being fully assembled belongs in `@PostConstruct`.
+
+### The older way (recognize in legacy code, don't write it)
+
+Before annotations, Spring used **interfaces** — you implemented a Spring interface and overrode its method:
+
+```java
+// ❌ Legacy style — couples YOUR class to Spring's interfaces
+@Service
+public class OrderService implements InitializingBean, DisposableBean {
+
+    @Override
+    public void afterPropertiesSet() {   // equivalent to @PostConstruct
+        System.out.println("init logic");
+    }
+
+    @Override
+    public void destroy() {              // equivalent to @PreDestroy
+        System.out.println("cleanup logic");
+    }
+}
+```
+
+| Approach | Init | Destroy | Verdict |
+|---|---|---|---|
+| **Annotations** | `@PostConstruct` | `@PreDestroy` | ✅ Use this — your class stays plain Java |
+| Interfaces | `InitializingBean.afterPropertiesSet()` | `DisposableBean.destroy()` | ❌ Legacy — ties your class to Spring |
+| `@Bean` attributes | `@Bean(initMethod="...")` | `@Bean(destroyMethod="...")` | For third-party classes you can't annotate |
+
+### Two important gotchas
+
+> ⚠️ **`@PreDestroy` only runs on a graceful shutdown.** *Graceful* = the app is asked politely to stop (`Ctrl+C`, `SIGTERM`, container stop) and is given time to clean up. If the process is force-killed (`kill -9`, power loss, crash), `@PreDestroy` **never runs**. Never rely on it for critical data-saving.
+
+> ⚠️ **`@PreDestroy` does not run for prototype-scoped beans.** Spring hands you a prototype bean and then forgets about it — it doesn't track it, so it can't destroy it. Only singleton beans get destroy callbacks. (**Scopes → Topic 6.**)
+
+**Interview line**: *"The bean lifecycle is: instantiate → inject dependencies → `@PostConstruct` → bean in use → `@PreDestroy` → destroy. `@PostConstruct` is preferred over constructor logic because it runs after **all** injection completes, and preferred over `InitializingBean` because it keeps your class free of Spring interfaces."*
