@@ -19,8 +19,14 @@ Quick-reference definitions. Each links to where it's explained in full.
 | **Decoupled** | A class depends only on an interface, not a concrete class — so implementations can be swapped without editing it. | [Section 1 doubt](#1-what-is-spring-framework-why-spring) |
 | **Component scanning** | Spring's startup search through your packages for annotated classes to register as beans. | [Section 3](#how-spring-actually-finds-a-bean-of-the-required-type-internals) |
 | **Deepest first** | The creation order: Spring builds the bean with **no dependencies of its own** first, then works back up the chain. | [Section 4c](#4c-creation-order-deepest-first) |
-| **Singleton** | Spring creates **one shared instance** and gives that same object to everyone who needs it. This is the default scope. | Topic 6 (Bean Scopes) |
-| **Scope** | How many instances of a bean Spring creates and how long each lives. | Topic 6 (Bean Scopes) |
+| **Singleton** | Spring creates **one shared instance** and gives that same object to everyone who needs it. This is the default scope. | [Section 6](#singleton--the-default) |
+| **Scope** | How many instances of a bean Spring creates and how long each lives. | [Section 6](#6-bean-scopes) |
+| **Prototype** | A **new instance** is created every time the bean is requested. | [Section 6](#prototype) |
+| **State / Stateful** | Data held in a field that **changes** while the app runs. | [Section 6](#️-the-biggest-singleton-pitfall--shared-mutable-state) |
+| **Stateless** | A class holding no changing data — only behavior plus fixed dependencies. Safe to share across users/threads. | [Section 6](#️-the-biggest-singleton-pitfall--shared-mutable-state) |
+| **Mutable** | Changeable after creation (opposite: *immutable*). | [Section 6](#️-the-biggest-singleton-pitfall--shared-mutable-state) |
+| **HTTP request** | One single call from a client to your server; starts on arrival, ends when the response is sent. | [Section 6](#the-scopes) |
+| **Session** | A series of requests from the same user over time (login → logout). | [Section 6](#the-scopes) |
 | **Eager** | Bean is created at startup even if nothing has used it yet — Spring's default. | Topic 10 (Lazy Init) |
 | **Lazy** | Bean is created only the first time something actually asks for it. | Topic 10 (Lazy Init) |
 | **Fail-fast** | Wiring errors crash the app **at startup** rather than surfacing later mid-request. | [Section 3](#how-spring-resolves-what-to-inject--by-type-first) |
@@ -653,3 +659,238 @@ public class OrderService implements InitializingBean, DisposableBean {
 > ⚠️ **`@PreDestroy` does not run for prototype-scoped beans.** Spring hands you a prototype bean and then forgets about it — it doesn't track it, so it can't destroy it. Only singleton beans get destroy callbacks. (**Scopes → Topic 6.**)
 
 **Interview line**: *"The bean lifecycle is: instantiate → inject dependencies → `@PostConstruct` → bean in use → `@PreDestroy` → destroy. `@PostConstruct` is preferred over constructor logic because it runs after **all** injection completes, and preferred over `InitializingBean` because it keeps your class free of Spring interfaces."*
+
+---
+
+## 6. Bean Scopes
+
+**"Scope"** = the answer to two questions: **how many instances** of this bean does Spring create, and **how long does each one live**?
+
+> 🔴 **Doubt (asked during this chapter): "You said an object is called a bean in Spring — but now you say 'how many instances of this bean'. Isn't an instance also an object?"**
+>
+> Answer: Yes, **"instance" and "object" mean the same thing** in Java (`new OrderService()` creates an instance = creates an object). The confusion comes from the word **"bean" being used loosely for two different things**. Three distinct levels:
+>
+> | Level | What it is | Exists where |
+> |---|---|---|
+> | **Class** | Your written code — the blueprint | In your `.java` file |
+> | **Bean definition** | Spring's registered recipe for that class (Section 4b) | In the container's registry, as metadata |
+> | **Bean instance** (= bean = object) | The actual live object | In memory (heap) |
+>
+> ```mermaid
+> flowchart TD
+>     A["<b>class OrderService</b><br/>your code — the blueprint<br/>(exists once, in a file)"] --> B["<b>Bean Definition</b><br/>Spring's recipe:<br/>'orderService → OrderService.class,<br/>scope: singleton'<br/>(exists once, in the registry)"]
+>     B -->|"scope decides<br/>HOW MANY to create"| C["<b>Bean Instances</b> (= objects)<br/>the real things in memory"]
+>     C --> D["singleton → 1 object"]
+>     C --> E["prototype → many objects<br/>obj#1, obj#2, obj#3..."]
+> ```
+>
+> So "how many instances of this bean" precisely means: **"from this one bean definition, how many objects does Spring create?"**
+> - **singleton** → 1 definition → **1 object**, shared by all
+> - **prototype** → 1 definition → **many objects**, one per request
+>
+> **Why the ambiguity exists**: Spring developers say "bean" for both the definition and the instance, depending on context. It's genuinely sloppy terminology that everyone uses. When unclear, ask yourself *"definition or object?"*:
+> - *"Spring registered 12 beans"* → 12 **definitions**
+> - *"inject the OrderService bean"* → the **object**
+> - *"prototype beans aren't destroyed"* → the **objects**
+
+### The scopes
+
+| Scope | How many instances | Lifetime | Availability |
+|---|---|---|---|
+| **`singleton`** (default) | **One**, shared by everyone | Entire app lifetime | Always |
+| **`prototype`** | **A new one** every time it's requested | Until garbage-collected | Always |
+| **`request`** | One per HTTP request | That one request | Web apps only |
+| **`session`** | One per user session | Until session expires/logout | Web apps only |
+| `application` | One per ServletContext | App lifetime | Web apps only (rare) |
+| `websocket` | One per WebSocket session | That connection | Web apps only (rare) |
+
+**Terms used above:**
+- **HTTP request** = one single call from a browser/client to your server (e.g. one `GET /order/500`). Starts when the call arrives, ends when your response is sent.
+- **Session** = a series of requests from the *same user* over time (e.g. login → logout). The server remembers who they are between requests.
+- **ServletContext** = the whole running web application, shared by all users. (Servlets → Chapter 2.)
+
+### Singleton — the default
+
+```java
+@Service   // no @Scope written = singleton
+public class OrderService { }
+```
+
+Every class needing an `OrderService` receives **the exact same object**:
+
+```mermaid
+flowchart TD
+    S["<b>ONE OrderService object</b><br/>created at startup<br/>(memory address: 0x1A2B)"]
+    C1["OrderController"] --> S
+    C2["ReportController"] --> S
+    C3["AdminController"] --> S
+    S2["All three hold a reference<br/>to the SAME object"]
+```
+
+**Why is one shared instance safe?** A typical service bean holds **no changing data** — only behavior (methods) plus injected dependencies that never change after startup. A class with no changing data is **stateless**, and stateless objects are safe to share.
+
+### ⚠️ The biggest singleton pitfall — shared mutable state
+
+**"State"** = data stored in a field that changes while the app runs. **"Mutable"** = changeable.
+
+```java
+// ❌ DANGEROUS — this field is shared across every user, every request
+@Service
+public class OrderService {
+
+    private double lastAmount;      // ← STATE. One field, shared by everyone.
+
+    public String placeOrder(double amount) {
+        this.lastAmount = amount;   // User A writes 500...
+        // ...User B's request writes 999 here at the same moment...
+        return "Charged " + this.lastAmount;   // User A now sees 999! 💥
+    }
+}
+```
+
+```mermaid
+flowchart TD
+    A["User A: placeOrder(500)<br/>sets lastAmount = 500"] --> S["<b>ONE shared OrderService</b><br/>lastAmount = ???"]
+    B["User B: placeOrder(999)<br/>sets lastAmount = 999"] --> S
+    S --> R["💥 User A gets back 999<br/>Data leaked between users"]
+```
+
+**The fix — keep beans stateless.** Use local variables (each method call gets its own copy) or method parameters instead of fields:
+
+```java
+// ✅ SAFE — no shared field; each call has its own local variable
+@Service
+public class OrderService {
+    public String placeOrder(double amount) {
+        double total = amount * 1.18;   // local variable, per-call, not shared
+        return "Charged " + total;
+    }
+}
+```
+
+**Rule to memorize**: *singleton beans must be stateless.* Injected dependencies held in `final` fields are fine (they never change). Fields reassigned during requests are the danger.
+
+### Prototype
+
+```java
+@Service
+@Scope("prototype")
+public class ReportGenerator {
+    private List<String> rows = new ArrayList<>();   // state is OK here —
+    // each caller gets their own fresh object, so nothing is shared
+}
+```
+
+```mermaid
+flowchart LR
+    subgraph SING["singleton"]
+        A1["Request 1"] --> B1["Same object"]
+        A2["Request 2"] --> B1
+        A3["Request 3"] --> B1
+    end
+    subgraph PROTO["prototype"]
+        C1["Request 1"] --> D1["New object #1"]
+        C2["Request 2"] --> D2["New object #2"]
+        C3["Request 3"] --> D3["New object #3"]
+    end
+```
+
+Use prototype when a bean **holds per-use data** and must not be shared — e.g. a builder, or a report accumulating rows.
+
+### ⚠️ The prototype trap (classic interview question)
+
+**Both files matter here — the scope is declared on `ReportGenerator`, not on `OrderService`:**
+
+```java
+// ══ FILE 1: ReportGenerator.java ══
+// THIS is where "prototype" is declared
+@Service
+@Scope("prototype")          // ← the ONLY place the scope is set
+public class ReportGenerator {
+    private List<String> rows = new ArrayList<>();
+}
+```
+
+```java
+// ══ FILE 2: OrderService.java ══
+@Service                     // ← no @Scope written = singleton (the default)
+public class OrderService {
+
+    private final ReportGenerator generator;
+
+    public OrderService(ReportGenerator generator) {
+        this.generator = generator;   // injected ONCE, at startup
+    }
+}
+```
+
+> 🔴 **Doubt (asked during this chapter): "How do I identify that `ReportGenerator` is a prototype bean?"**
+>
+> Answer: There is only one way — **open that class's file and look for a `@Scope` annotation above the class declaration.** The scope is never visible at the injection site.
+>
+> ```mermaid
+> flowchart TD
+>     A["Want to know a bean's scope?"] --> B["Open THAT class's file"]
+>     B --> C{"Is there a @Scope annotation<br/>above the class?"}
+>     C -->|"@Scope('prototype')"| D["prototype → new object each time"]
+>     C -->|"@Scope('request')"| E["request → one per HTTP request"]
+>     C -->|"No @Scope at all"| F["singleton → one shared object<br/>(the default)"]
+> ```
+>
+> **This is exactly why the trap is dangerous.** Looking at `OrderService` alone:
+> ```java
+> public OrderService(ReportGenerator generator) {   // looks completely normal
+> ```
+> Nothing hints that `ReportGenerator` is a prototype — the code reads identically for singleton or prototype dependencies. A developer writes this expecting fresh instances and silently gets one instance reused forever, with **no error and no startup warning**.
+>
+> ```mermaid
+> flowchart LR
+>     A["OrderService.java<br/>─────────<br/>'give me a ReportGenerator'<br/><br/>❓ scope invisible here"] -.->|"must open the other file<br/>to learn the truth"| B["ReportGenerator.java<br/>─────────<br/>@Scope('prototype')<br/><br/>✅ scope declared here"]
+> ```
+>
+> **Practical takeaway**: whenever you mark a class `@Scope("prototype")`, immediately check every place it's injected — if any consumer is a singleton, that consumer needs `ObjectProvider` instead of direct injection.
+
+**Expectation**: a fresh `ReportGenerator` on every use.
+**Reality**: `OrderService` is a singleton, so its constructor runs **once**, so `generator` is injected **once**. That same prototype instance is reused forever — the prototype scope is effectively dead.
+
+```mermaid
+flowchart TD
+    A["OrderService (singleton)<br/>constructor runs ONCE at startup"] --> B["Spring creates ONE ReportGenerator<br/>and injects it"]
+    B --> C["❌ That same instance is reused<br/>for every request, forever.<br/>Prototype scope had no effect."]
+```
+
+**Fix — ask the container for a fresh instance each time via `ObjectProvider`:**
+
+```java
+@Service
+public class OrderService {
+
+    private final ObjectProvider<ReportGenerator> generatorProvider;
+
+    public OrderService(ObjectProvider<ReportGenerator> generatorProvider) {
+        this.generatorProvider = generatorProvider;
+    }
+
+    public void run() {
+        ReportGenerator fresh = generatorProvider.getObject();  // NEW instance every call ✅
+    }
+}
+```
+
+### ⚠️ Prototype beans get no destroy callback
+
+Spring creates a prototype bean, hands it over, and then **forgets it exists** — it keeps no reference to it. So it cannot call `@PreDestroy` (Topic 5). Cleanup of prototype beans is your responsibility.
+
+### Two more things interviewers ask
+
+**1. Spring singleton ≠ the Java Singleton design pattern.**
+
+| | Java Singleton pattern | Spring singleton scope |
+|---|---|---|
+| Scope of uniqueness | One instance per **JVM** (private constructor + static `getInstance()`) | One instance per **Spring container** |
+| Enforced by | Your own code | The container |
+| Multiple instances possible? | No | **Yes** — two containers in one JVM = two instances |
+
+**2. `request` and `session` scopes are rare today.** Modern REST APIs are **stateless** — each request carries everything needed (typically a JWT token, Chapter 7). Nothing is stored server-side between requests, so session-scoped beans have largely disappeared from modern codebases.
+
+**Interview line**: *"Singleton is the default — one shared instance per container, so singleton beans must be stateless. Prototype creates a new instance per request, but injecting a prototype into a singleton silently gives you only one instance; use `ObjectProvider` to get a fresh one. Request and session scopes are web-only and rare in stateless REST APIs."*
